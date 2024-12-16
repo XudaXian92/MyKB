@@ -1,0 +1,33 @@
+背景：云上K3s部署的业务突然访问报502
+着手：
+  浏览器打开开发者工具访问业务，确认错误码
+  登录服务器查看服务器状态、资源、IO、网络
+  查看性能数据这些都是正常的 kubectl get node 反馈：
+        [root@114514 ~]# kubectl get node -o wide 
+        E1216 10:44:47.618107   17652 memcache.go:265] couldn't get current server API group list: the server has asked for the client to provide credentials
+        E1216 10:44:47.619148   17652 memcache.go:265] couldn't get current server API group list: the server has asked for the client to provide credentials
+        E1216 10:44:47.620394   17652 memcache.go:265] couldn't get current server API group list: the server has asked for the client to provide credentials
+        E1216 10:44:47.621213   17652 memcache.go:265] couldn't get current server API group list: the server has asked for the client to provide credentials
+        E1216 10:44:47.623136   17652 memcache.go:265] couldn't get current server API group list: the server has asked for the client to provide credentials
+        error: You must be logged in to the server (the server has asked for the client to provide credentials
+   反馈APIserver异常，盲猜到可能是tls到期导致GG，再journalctl -u k3s -f 确认一下
+        Dec 16 10:46:31 114514 k3s[1179]: E1216 10:46:31.579504    1179 authentication.go:70] "Unable to authenticate the request" err="[x509: certificate has expired or is not yet valid: current time 2024-12-16T10:46:31+08:00 is after 2024-10-24T15:44:29Z, verifying certificate SN=x95, SKID=, AKID=48xB:72:1x failed: x509: certificate has expired or is not yet valid: current time 2024-12-16T10:46:31+08:00 is after 2024-10-24T15:44:29Z]"
+        Dec 16 10:46:31 114514Z k3s[1179]: W1216 10:46:31.579945    1179 reflector.go:533] k8s.io/client-go@v1.27.1-k3s1/tools/cache/reflector.go:231: failed to list *v1.ConfigMap: Unauthorized
+        Dec 16 10:46:31 114514 k3s[1179]: E1216 10:46:31.579995    1179 reflector.go:148] k8s.io/client-go@v1.27.1-k3s1/tools/cache/reflector.go:231: Failed to watch *v1.ConfigMap: failed to list *v1.ConfigMap: Unauthorized
+        Dec 16 10:46:31 114514 k3s[1179]: E1216 10:46:31.746271    1179 authentication.go:70] "Unable to authenticate the request" err="[x509: certificate has expired or is not yet valid: current time 2024-12-16T10:46:31+08:00 is after 2024-10-24T15:44:29Z, verifying certificate SN=4x5, SKID=, AKID=48:x9A failed: x509: certificate has expired or is not yet valid: current time 2024-12-16T10:46:31+08:00 is after 2024-10-24T15:44:29Z]"
+        Dec 16 10:46:31 114514 k3s[1179]: W1216 10:46:31.746601    1179 client_builder_dynamic.go:197] get or create service account failed: Unauthorized
+       根据"certificate has expired or is not yet valid: current time 2024-12-16T10:46:31+08:00 is after 2024-10-24T15:44:29" 实锤tls过期！（不过说回来，要不是冷不丁的502谁都没注意到这个事情，值得反思）
+  开始重新推新的证书上去
+      cp -r /var/lib/rancher/k3s/server/tls /var/lib/rancher/k3s/server/tls.bak 道路千万条，备份永远是ops的第一条
+  查了文档删掉重启服务就会重新生成这个证书
+      rm -f /var/lib/rancher/k3s/server/tls/*.crt
+      rm -f /var/lib/rancher/k3s/server/tls/*.key
+      systemctl restart k3s
+      systemctl status k3s
+      openssl x509 -in /var/lib/rancher/k3s/server/tls/server-ca.crt -noout -dates #AI教的 确保证书已更新，重新验证其有效期
+  证书更新之后，我kubectl 仍然无法使用，查了得重新生成kubeconfig
+      k3s kubectl config view --raw > ~/.kube/config
+  验证
+      kubectl get nodes
+  有节点信息输出，通了，访问kuboard也好了 至此问题解决
+反思：证书到期时间没拿捏了 确实有点说不过去，根据证书下次到期时间写一个cron 脚本内容思路上 用解决问题的四个主要命令即可。
